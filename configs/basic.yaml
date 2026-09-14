@@ -1,0 +1,12 @@
+scenario: "basic"          # basic | defend_the_center | health_gathering | deadly_corridor
+frame_height: 84
+frame_width: 84
+encode_size: 28          # downsampled SNN input (28 or 16); 28*28=784 fits Cerebra-H
+stack_frames: 4
+frame_skip: 4
+timestep_T: 50           # Poisson window; sweep {50, 25} in week 5
+hidden_size: 128         # 128 -> 256 in week 6; total neurons must stay <= 1024
+n_actions: 3             # basic: MOVE_LEFT/RIGHT, ATTACK
+learning_rate: 0.00025
+gamma: 0.99
+seed: 0

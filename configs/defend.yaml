@@ -1,0 +1,12 @@
+scenario: "defend_the_center"
+frame_height: 84
+frame_width: 84
+encode_size: 28
+stack_frames: 4
+frame_skip: 4
+timestep_T: 50
+hidden_size: 128
+n_actions: 3
+learning_rate: 0.00025
+gamma: 0.99
+seed: 0
