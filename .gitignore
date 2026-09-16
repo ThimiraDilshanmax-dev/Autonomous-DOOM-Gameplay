@@ -8,3 +8,11 @@ artifacts/
 *.pth
 *.pt
 *.npz
+_vizdoom.ini
+zdoomstat.txt
+training_basic200/
+training_*/
+conversion_*/
+finetune_*/
+quant_*/
+robust_*/

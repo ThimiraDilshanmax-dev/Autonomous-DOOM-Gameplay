@@ -15,7 +15,7 @@ def main():
         print()
     except ImportError:
         print("torch: MISSING (pip install torch --index-url https://download.pytorch.org/whl/cu121)")
-    for pkg in ["snnTorch", "spikingjelly", "vizdoom", "stable_baselines3", "gymnasium"]:
+    for pkg in ["snntorch", "spikingjelly", "vizdoom", "stable_baselines3", "gymnasium"]:
         try:
             __import__(pkg)
             print(f"{pkg}: OK")
