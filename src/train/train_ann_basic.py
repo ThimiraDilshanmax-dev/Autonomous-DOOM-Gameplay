@@ -95,8 +95,8 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
     import time
     import yaml
     import torch
-    from src.env.vizdoom_wrapper import create_game, get_action_table
-    from src.env.preprocessing import FrameStack
+    from src.env.vizdoom_wrapper import create_game, get_action_table_for_scenario
+    from src.env.preprocessing import FrameStack, obs_dim, stack_to_obs
     from src.models.ann_mlp import AnnMlp
     from src.eval.evaluate import score_summary
 
@@ -107,9 +107,12 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     vid_dir.mkdir(parents=True, exist_ok=True)
 
+    scenario = cfg.get("scenario", "basic")
     size, n_actions = cfg["encode_size"], cfg["n_actions"]
+    stack_frames = int(cfg.get("stack_frames", 4))
+    obs_mode = cfg.get("obs_mode", "mean")
     hidden = cfg.get("hidden_size", 128)
-    input_dim = size * size  # single encoded frame (mean of stack) for MLP
+    input_dim = obs_dim(size, stack_frames, obs_mode)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     q_net = AnnMlp(input_dim, hidden, n_actions).to(device)
     target = AnnMlp(input_dim, hidden, n_actions).to(device)
@@ -130,35 +133,52 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
         print(f"[train] tensorboard disabled ({e})")
         tb = None
 
-    scenario_actions = get_action_table(n_actions)
-    game = create_game(cfg["scenario"],
+    scenario_actions = get_action_table_for_scenario(scenario)
+    assert len(scenario_actions) == n_actions, (
+        f"{scenario}: cfg n_actions={n_actions} but scenario table "
+        f"has {len(scenario_actions)}")
+    game = create_game(scenario,
                        episode_timeout=int(cfg.get("episode_timeout", 300)))
     got = len(game.get_available_buttons())
     assert got == n_actions, (
-        f"{cfg['scenario']}: cfg n_actions={n_actions} but env exposes {got}")
+        f"{scenario}: cfg n_actions={n_actions} but env exposes {got}")
     buf = ReplayBuffer(cfg.get("replay_capacity", 20000))
     try:
         import vizdoom as vzd
         _HIT = vzd.GameVariable.HITCOUNT
+        _HEALTH = vzd.GameVariable.HEALTH
     except Exception:
         _HIT = None
+        _HEALTH = None
     hit_bonus = float(cfg.get("hit_bonus", 0.0))
-    stacker = FrameStack(cfg.get("stack_frames", 4), size)
+    health_bonus = float(cfg.get("health_bonus", 0.0))
+    is_health = (scenario == "health_gathering")
+    # Health has no shooting: force HITCOUNT shaping off even if config
+    # still carries a legacy hit_bonus value.
+    if is_health:
+        hit_bonus = 0.0
+    stacker = FrameStack(stack_frames, size)
     eps = cfg.get("eps_start", 1.0)
     eps_end, eps_decay = cfg.get("eps_end", 0.1), cfg.get("eps_decay", 0.995)
 
-    rewards, losses, kills = [], [], []
+    rewards, losses, kills, survivals = [], [], [], []
     best_reward = -1e9
+
+    def _read_var(var, default=0.0):
+        if var is None:
+            return default
+        try:
+            return float(game.get_game_variable(var))
+        except Exception:
+            return default
 
     for ep in range(episodes):
         game.new_episode()
         state = game.get_state()
-        obs = stacker.reset(state.screen_buffer).mean(axis=0).reshape(-1)
+        obs = stack_to_obs(stacker.reset(state.screen_buffer), obs_mode)
         done = game.is_episode_finished()
-        try:
-            prev_hits = float(game.get_game_variable(_HIT)) if _HIT is not None else 0.0
-        except Exception:
-            prev_hits = 0.0
+        prev_hits = _read_var(_HIT, 0.0)
+        prev_health = _read_var(_HEALTH, 100.0)
         ep_loss, steps = 0.0, 0
         while not done:
             if random.random() < eps:
@@ -173,15 +193,27 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
             # kill bonus from replay and the agent learns never to shoot.
             # Rewards are scaled (Mnih-style) so MSE targets stay small.
             r = float(game.get_last_reward()) * cfg.get("reward_scale", 1.0)
-            if hit_bonus and _HIT is not None:
+            if hit_bonus and _HIT is not None and not is_health:
                 try:
                     hits = float(game.get_game_variable(_HIT))
                     r += hit_bonus * (hits - prev_hits)
                     prev_hits = hits
                 except Exception:
                     pass
-            nobs = obs if done else stacker.step(
-                game.get_state().screen_buffer).mean(axis=0).reshape(-1)
+            if is_health and health_bonus and _HEALTH is not None and not done:
+                try:
+                    health = float(game.get_game_variable(_HEALTH))
+                    r += health_bonus * (health - prev_health)
+                    prev_health = health
+                except Exception:
+                    pass
+            if is_health and not done:
+                try:
+                    prev_health = float(game.get_game_variable(_HEALTH))
+                except Exception:
+                    pass
+            nobs = obs if done else stack_to_obs(stacker.step(
+                game.get_state().screen_buffer), obs_mode)
             buf.push(obs, a, r, nobs, float(done))
             obs = nobs
             steps += 1
@@ -198,7 +230,13 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
         eps = max(eps_end, eps * eps_decay)
         total = float(game.get_total_reward())
         rewards.append(total)
-        kills.append(1.0 if total > 0 else 0.0)  # basic/defend: positive total ⇒ frag(s)
+        survivals.append(float(steps))
+        if is_health:
+            # Survival time is the health metric; frag-based kills are
+            # meaningless here (previously always 1.0).
+            pass
+        else:
+            kills.append(1.0 if total > 0 else 0.0)  # basic/defend: positive total ⇒ frag(s)
         avg_loss = ep_loss / max(steps, 1)
         losses.append(avg_loss)
         print(f"ep={ep} reward={total:.1f} avg_loss={avg_loss:.4f} eps={eps:.2f} steps={steps}", flush=True)
@@ -218,7 +256,7 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
                 game.new_episode()
                 frames = []
                 st = game.get_state()
-                vo = stacker.reset(st.screen_buffer).mean(axis=0).reshape(-1)
+                vo = stack_to_obs(stacker.reset(st.screen_buffer), obs_mode)
                 vd = game.is_episode_finished()
                 while not vd:
                     frames.append(np.array(game.get_state().screen_buffer))
@@ -227,16 +265,20 @@ def run_vizdoom_dqn(config_path: str = "configs/basic.yaml", episodes: int = 50,
                     game.make_action(scenario_actions[va], frame_skip)
                     vd = game.is_episode_finished()
                     if not vd:
-                        vo = stacker.step(game.get_state().screen_buffer).mean(axis=0).reshape(-1)
+                        vo = stack_to_obs(stacker.step(game.get_state().screen_buffer), obs_mode)
                     if len(frames) > cfg.get("max_steps", 2000):
                         break
                 _save_video(frames, str(vid_dir / f"ep{ep + 1}_{cfg['scenario']}.mp4"))
 
     torch.save(q_net.state_dict(), ckpt_dir / "final.pth")
-    summary = score_summary(rewards, kills)
-    summary.update({"best_reward": best_reward, "scenario": cfg["scenario"],
+    if is_health:
+        summary = score_summary(rewards, None, survivals)
+    else:
+        summary = score_summary(rewards, kills, survivals)
+    summary.update({"best_reward": best_reward, "scenario": scenario,
                     "episodes": episodes, "device": device,
-                    "hit_bonus": hit_bonus})
+                    "hit_bonus": hit_bonus, "health_bonus": health_bonus,
+                    "obs_mode": obs_mode, "input_dim": input_dim})
     import json
     (out / "scores.json").write_text(json.dumps(summary, indent=2))
     print("SCORES:", summary, flush=True)

@@ -7,6 +7,7 @@ frame_skip: 4
 timestep_T: 50
 hidden_size: 128
 n_actions: 7
+obs_mode: "mean"
 learning_rate: 0.00025
 gamma: 0.99
 seed: 0

@@ -21,14 +21,17 @@ def main():
     stk = FrameStack(k=4, size=28)
     s = stk.reset(fake)
     assert s.shape == (4, 28, 28)
-    print(f"[1/4] preprocessing OK {s.shape}")
+    print(f"[1/5] preprocessing OK {s.shape}")
 
-    # 2. Poisson encoder rate ~ intensity
+    # 2. Poisson encoder rate ~ intensity (+ gain for dark frames)
     x = np.full((28, 28), 0.8, dtype=np.float32)
     spikes = poisson_encode(x, T=50, seed=0)
     rate = spikes.mean()
     assert spikes.shape == (50, 28, 28) and 0.6 < rate < 0.95, rate
-    print(f"[2/4] poisson OK mean_rate={rate:.3f}")
+    print(f"[2/5] poisson OK mean_rate={rate:.3f}")
+    from src.env.poisson_encoder import auto_gain
+    assert auto_gain(np.full((28, 28), 0.05, dtype=np.float32)) > 1.0
+    assert auto_gain(np.full((28, 28), 0.8, dtype=np.float32)) == 1.0
 
     # 3-4. torch models (skip gracefully if torch missing)
     try:
@@ -38,17 +41,52 @@ def main():
         return
     from src.models.ann_mlp import AnnMlp
     from src.models.snn_mlp import SnnMlp
+    from src.env.vizdoom_wrapper import get_action_table_for_scenario
+    from src.env.preprocessing import obs_dim, stack_to_obs
+    # Scenario tables: each scenario has an explicit entry so semantics
+    # (TURN vs MOVE vs ATTACK) can't drift. Note the 3-button single-press
+    # vectors are all one-hots, so values coincide — the mapping is what
+    # matters (index 0 = first .cfg button: MOVE_LEFT in basic, TURN_LEFT
+    # in defend/health; index 2 = ATTACK in basic/defend, MOVE_FORWARD in
+    # health). Assert presence + shape, not value inequality.
+    from src.env import vizdoom_wrapper as _vw
+    assert set(_vw.SCENARIO_ACTIONS) >= {"basic", "defend_the_center",
+                                         "health_gathering", "deadly_corridor"}
+    assert len(get_action_table_for_scenario("basic")) == 3
+    assert len(get_action_table_for_scenario("health_gathering")) == 3
+    assert len(get_action_table_for_scenario("defend_the_center")) == 3
+    assert len(get_action_table_for_scenario("deadly_corridor")) == 7
+    print("[2b/5] scenario actions OK (explicit per-scenario tables)")
+
+    # Both obs paths: mean 784 (legacy) and stack 3136 (navigation).
+    assert obs_dim(28, 4, "mean") == 784
+    assert obs_dim(28, 4, "stack") == 3136
+    fake_stack = np.random.rand(4, 28, 28).astype(np.float32)
+    assert stack_to_obs(fake_stack, "mean").shape == (784,)
+    assert stack_to_obs(fake_stack, "stack").shape == (3136,)
+    print("[2c/5] obs modes OK (mean 784, stack 3136)")
+
     ann = AnnMlp(784, 128, 3)
     q = ann(torch.randn(2, 784))
     assert q.shape == (2, 3)
-    print(f"[3/4] ann OK {tuple(q.shape)}")
+    print(f"[3/5] ann OK {tuple(q.shape)}")
+
+    # Health-geometry ANN/SNN (stacked input) must also fit Cerebra-H.
+    ann_h = AnnMlp(3136, 128, 3)
+    qh = ann_h(torch.randn(2, 3136))
+    assert qh.shape == (2, 3)
 
     snn = SnnMlp(784, 32, 3, T=4, beta=0.5)  # tiny T for speed
     rate_in = torch.rand(4, 2, 784)
     out = snn(rate_in)
     assert out.shape == (2, 3) and torch.isfinite(out).all()
     assert snn.neuron_count() <= 1024
-    print(f"[4/4] snn OK {tuple(out.shape)} neurons={snn.neuron_count()}")
+    print(f"[4/5] snn OK {tuple(out.shape)} neurons={snn.neuron_count()}")
+
+    snn_h = SnnMlp(3136, 32, 3, T=4, beta=0.5)
+    out_h = snn_h(torch.rand(4, 2, 3136))
+    assert out_h.shape == (2, 3) and torch.isfinite(out_h).all()
+    assert snn_h.neuron_count() <= 1024
 
     from src.export.cerebra_export import export_snn
     import tempfile

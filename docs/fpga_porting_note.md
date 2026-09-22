@@ -68,7 +68,23 @@ traffic uses the **L1 router only**; L2 is untouched. Spare capacity
 4. Close the loop with ViZDoom (`src/env/vizdoom_wrapper.py`, basic.cfg) and
    record the gameplay video.
 
-## 6. Open issues (honest)
+## 6. Health_gathering appendix (stacked obs)
+
+- Geometry: `obs_mode stack` -> input `4*28*28=3136` (vs basic 784).
+  `fc1 128x3136 = 401,408` synapses; total `~418k / 524k (80%)`, neurons
+  `259 / 1024 (25%)` — fits but uses 3.5x the weight memory of basic
+  (weight memory is ~96% of Cerebra-H power per SNAP-V). If power is tight,
+  use `hidden 64` (~205k synapses, 39%) and retrain.
+- Actions: `TURN_LEFT, TURN_RIGHT, MOVE_FORWARD` (3 one-hots, same vectors
+  as basic but different .cfg button order — see `vizdoom_wrapper.py`).
+- Reward: env `+1/tick` survival + `-100` death plus `health_bonus * dHEALTH`
+  shaping; no HITCOUNT. Metric is survival steps, not kills.
+- Old `training_health1500/3000` checkpoints are mean/784 and incompatible
+  with stack/3136 — retrain with `configs/health.yaml` (`training_health_fixed`).
+- Encoder: use `poisson_encoder(auto_gain)` for dark maze frames (dark split
+  was ~59% agreement in `robust_basic/`).
+
+## 7. Open issues (honest)
 
 - **Biases**: `weights.npz` includes fc biases. Map each to a constant
   current injection per neuron, or fold into thresholds — confirm against

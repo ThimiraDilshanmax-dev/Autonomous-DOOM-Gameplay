@@ -19,10 +19,18 @@ if str(_ROOT) not in __import__("sys").path:
 
 
 def build_student(ann, size: int, hidden: int, n_actions: int,
-                  T: int, beta: float, thresholds: list[float]):
+                  T: int, beta: float, thresholds: list[float],
+                  input_dim: int | None = None):
     import torch
     from src.models.snn_mlp import SnnMlp
-    snn = SnnMlp(size * size, hidden, n_actions, T=T, beta=beta,
+    if input_dim is None:
+        # Infer from teacher: fc1.in_features is the source of truth and
+        # keeps mean (784) and stack (3136) checkpoints compatible.
+        try:
+            input_dim = int(ann.net[0].in_features)
+        except Exception:
+            input_dim = size * size
+    snn = SnnMlp(input_dim, hidden, n_actions, T=T, beta=beta,
                  threshold=thresholds[0])
     snn.fc1.load_state_dict(ann.net[0].state_dict())
     snn.fc2.load_state_dict(ann.net[2].state_dict())
@@ -39,13 +47,15 @@ def build_student(ann, size: int, hidden: int, n_actions: int,
     return snn
 
 
-def encode_batch(obs: np.ndarray, T: int):
+def encode_batch(obs: np.ndarray, T: int, gain: float = 1.0):
     import torch
     from src.env.poisson_encoder import poisson_encode
-    b = obs.reshape(-1, 28, 28) if obs.shape[1] == 784 else obs
-    spikes = poisson_encode(b, T=T, seed=None)  # fresh sample each call
-    if spikes.ndim == 4:
-        spikes = spikes.reshape(T, -1, 784)
+    # Obs-shape agnostic (784 or 3136+). Optional gain compensates for
+    # darkened/low-contrast navigation frames (see robustness report).
+    if gain != 1.0:
+        import numpy as np
+        obs = np.clip(obs.astype(np.float32) * gain, 0.0, 1.0)
+    spikes = poisson_encode(obs, T=T, seed=None)  # fresh sample each call
     return torch.as_tensor(spikes, dtype=torch.float32)
 
 
@@ -65,14 +75,28 @@ def finetune(checkpoint: str, config_path: str = "configs/basic.yaml",
 
     cfg = yaml.safe_load(open(config_path))
     size, hidden, n_actions = cfg["encode_size"], cfg["hidden_size"], cfg["n_actions"]
+    from src.env.preprocessing import obs_dim
+    input_dim = obs_dim(size, int(cfg.get("stack_frames", 4)),
+                        cfg.get("obs_mode", "mean"))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ann = AnnMlp(size * size, hidden, n_actions)
-    ann.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    ann = AnnMlp(input_dim, hidden, n_actions)
+    try:
+        ann.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"checkpoint {checkpoint} incompatible with {config_path} "
+            f"(input_dim={input_dim}, hidden={hidden}). Old health checkpoints "
+            f"trained with mean/784 must be retrained with stack/3136. Original: {e}")
     ann.eval()
 
-    obs_all = collect_observations(cfg, n_train + n_val, seed=cfg.get("seed", 0))
+    try:
+        obs_all = collect_observations(cfg, n_train + n_val, seed=cfg.get("seed", 0))
+    except Exception as e:
+        print(f"[finetune] vizdoom unavailable ({e}) — synthetic data for offline test")
+        rng = np.random.default_rng(0)
+        obs_all = rng.random((n_train + n_val, input_dim), dtype=np.float32)
     tr, va = obs_all[:n_train], obs_all[n_train:]
     q_teacher_tr = ann(torch.as_tensor(tr)).detach()
     print(f"[finetune] data: {len(tr)} train / {len(va)} val", flush=True)
@@ -110,7 +134,7 @@ def finetune(checkpoint: str, config_path: str = "configs/basic.yaml",
             best = m["agreement"]
             best_state = {k: v.cpu().clone() for k, v in snn.state_dict().items()}
     if best_state is not None:
-        snn.load_state_dict(best_state)
+        snn.load_state_dict(best_state, strict=False)
     torch.save(snn.state_dict(), out / "snn_finetuned.pth")
 
     # final T-sweep on the fine-tuned weights

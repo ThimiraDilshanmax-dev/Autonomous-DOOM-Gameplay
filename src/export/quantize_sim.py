@@ -44,24 +44,39 @@ def simulate(config_path: str, snn_weights: str, ann_checkpoint: str,
 
     cfg = yaml.safe_load(open(config_path))
     size, hidden, n_actions = cfg["encode_size"], cfg["hidden_size"], cfg["n_actions"]
+    from src.env.preprocessing import obs_dim
+    input_dim = obs_dim(size, int(cfg.get("stack_frames", 4)),
+                        cfg.get("obs_mode", "mean"))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ann = AnnMlp(size * size, hidden, n_actions)
-    ann.load_state_dict(torch.load(ann_checkpoint, map_location="cpu"))
+    ann = AnnMlp(input_dim, hidden, n_actions)
+    try:
+        ann.load_state_dict(torch.load(ann_checkpoint, map_location="cpu"))
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"checkpoint {ann_checkpoint} incompatible with {config_path} "
+            f"(input_dim={input_dim}). Original: {e}")
     ann.eval()
 
-    obs = collect_observations(cfg, n_val, seed=cfg.get("seed", 0) + 999)
+    try:
+        obs = collect_observations(cfg, n_val, seed=cfg.get("seed", 0) + 999)
+    except Exception as e:
+        print(f"[quant] vizdoom unavailable ({e}) — synthetic obs for offline test")
+        rng = np.random.default_rng(1)
+        obs = rng.random((n_val, input_dim), dtype=np.float32)
     thresholds = [t * threshold_scale
                   for t in calibrate_thresholds(ann, obs, percentile)]
 
     float_net = build_student(ann, size, hidden, n_actions, T, beta, thresholds)
-    float_net.load_state_dict(torch.load(snn_weights, map_location="cpu"))
+    # strict=False: checkpoints saved with snnTorch buffers still load under
+    # the pure-torch fallback (and vice versa); only fc.* matter for fidelity.
+    float_net.load_state_dict(torch.load(snn_weights, map_location="cpu"), strict=False)
     float_net.eval()
 
     # int8-simulated twin: same topology, dequantized weights
     quant_net = build_student(ann, size, hidden, n_actions, T, beta, thresholds)
-    quant_net.load_state_dict(torch.load(snn_weights, map_location="cpu"))
+    quant_net.load_state_dict(torch.load(snn_weights, map_location="cpu"), strict=False)
     scales = {}
     with torch.no_grad():
         for name in ["fc1.weight", "fc2.weight", "fc3.weight"]:
@@ -74,8 +89,7 @@ def simulate(config_path: str, snn_weights: str, ann_checkpoint: str,
     quant_net.eval()
 
     from src.env.poisson_encoder import poisson_encode
-    spikes = poisson_encode(obs.reshape(-1, 28, 28), T=T, seed=1)
-    spikes = spikes.reshape(T, -1, 784)
+    spikes = poisson_encode(obs, T=T, seed=1)
     x = torch.as_tensor(spikes, dtype=torch.float32)
     with torch.no_grad():
         q_float = float_net(x)
@@ -89,9 +103,11 @@ def simulate(config_path: str, snn_weights: str, ann_checkpoint: str,
     mse = float(((q_float - q_quant) ** 2).mean())
 
     # fixed-point membrane sanity: worst-case accumulated current per step
-    # must fit int16 with the chosen weight scale (HW membrane registers)
+    # must fit int16 with the chosen weight scale (HW membrane registers).
+    # Uses actual fan-in (input_dim), so stack mode (3136) is checked
+    # correctly instead of silently assuming 784.
     max_w = max(scales.values())
-    fits_i16 = bool(max_w * size * 1.0 < 32767 * (2 ** -8))
+    fits_i16 = bool(max_w * float(input_dim) < 32767 * (2 ** -8))
 
     report = {
         "snn_weights": snn_weights, "T": T, "beta": beta,

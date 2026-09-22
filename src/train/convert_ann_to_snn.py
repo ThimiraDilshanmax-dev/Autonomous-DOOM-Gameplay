@@ -20,26 +20,34 @@ if str(_ROOT) not in __import__("sys").path:
 
 
 def collect_observations(cfg, n: int = 512, seed: int = 0) -> np.ndarray:
-    """Real frame-stack observations from random ViZDoom rollouts."""
-    from src.env.vizdoom_wrapper import create_game, BASIC_ACTIONS
-    from src.env.preprocessing import FrameStack
+    """Real frame-stack observations from random ViZDoom rollouts.
+
+    Scenario-aware: uses the correct action table (health needs
+    TURN/MOVE_FORWARD, not basic MOVE/ATTACK) and the configured
+    obs_mode (mean vs stack) so calibration matches training.
+    """
+    from src.env.vizdoom_wrapper import create_game, get_action_table_for_scenario
+    from src.env.preprocessing import FrameStack, stack_to_obs
     import random
     rng = random.Random(seed)
-    game = create_game(cfg["scenario"])
+    scenario = cfg.get("scenario", "basic")
+    obs_mode = cfg.get("obs_mode", "mean")
+    actions = get_action_table_for_scenario(scenario)
+    game = create_game(scenario)
     stacker = FrameStack(cfg.get("stack_frames", 4), cfg["encode_size"])
     obs = []
     while len(obs) < n:
         game.new_episode()
-        o = stacker.reset(game.get_state().screen_buffer).mean(axis=0).reshape(-1)
+        o = stack_to_obs(stacker.reset(game.get_state().screen_buffer), obs_mode)
         obs.append(o)
         done = game.is_episode_finished()
         steps = 0
         while not done and len(obs) < n:
-            game.make_action(BASIC_ACTIONS[rng.randrange(len(BASIC_ACTIONS))],
+            game.make_action(actions[rng.randrange(len(actions))],
                              cfg.get("frame_skip", 4))
             done = game.is_episode_finished()
             if not done:
-                o = stacker.step(game.get_state().screen_buffer).mean(axis=0).reshape(-1)
+                o = stack_to_obs(stacker.step(game.get_state().screen_buffer), obs_mode)
                 obs.append(o)
             steps += 1
             if steps > 500:
@@ -64,18 +72,20 @@ def calibrate_thresholds(ann, obs: np.ndarray, percentile: float = 99.0) -> list
 
 
 def agreement(ann, snn, obs: np.ndarray, T: int) -> dict:
-    """Action agreement + output MSE between ANN and Poisson-driven SNN."""
+    """Action agreement + output MSE between ANN and Poisson-driven SNN.
+
+    Obs-shape agnostic: works for mean (B,784) and stack (B,3136) inputs.
+    Poisson encoding is applied directly to the flat vector so no temporal
+    info is collapsed here either.
+    """
     import torch
     from src.env.poisson_encoder import poisson_encode
     ann.eval()
     with torch.no_grad():
         q_ann = ann(torch.as_tensor(obs, dtype=torch.float32))
         a_ann = q_ann.argmax(dim=1)
-    spikes = poisson_encode(obs.reshape(-1, 28, 28)
-                            if obs.shape[1] == 784 else obs.reshape(-1, 4, 28, 28).mean(axis=1),
-                            T=T, seed=0)
-    if spikes.ndim == 4:  # (T, B, 28, 28) -> (T, B, 784)
-        spikes = spikes.reshape(T, -1, 784)
+    spikes = poisson_encode(obs, T=T, seed=0)
+    # spikes: (T, B, D) — already matches SNN input (T, B, input_dim).
     with torch.no_grad():
         q_snn = snn(torch.as_tensor(spikes, dtype=torch.float32))
         a_snn = q_snn.argmax(dim=1)
@@ -105,11 +115,20 @@ def convert(checkpoint: str, config_path: str = "configs/basic.yaml",
 
     cfg = yaml.safe_load(open(config_path))
     size, hidden, n_actions = cfg["encode_size"], cfg["hidden_size"], cfg["n_actions"]
+    from src.env.preprocessing import obs_dim
+    input_dim = obs_dim(size, int(cfg.get("stack_frames", 4)),
+                        cfg.get("obs_mode", "mean"))
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ann = AnnMlp(size * size, hidden, n_actions)
-    ann.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    ann = AnnMlp(input_dim, hidden, n_actions)
+    try:
+        ann.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"checkpoint {checkpoint} incompatible with {config_path} "
+            f"(input_dim={input_dim}). Health moved mean/784 -> stack/3136; "
+            f"retrain health from scratch. Original: {e}")
     print(f"[convert] loaded ANN {checkpoint}")
 
     try:
@@ -128,7 +147,7 @@ def convert(checkpoint: str, config_path: str = "configs/basic.yaml",
               "threshold_scale": threshold_scale,
               "thresholds": thresholds, "beta": beta, "sweeps": []}
     for T in timesteps:
-        snn = SnnMlp(size * size, hidden, n_actions, T=T, beta=beta,
+        snn = SnnMlp(input_dim, hidden, n_actions, T=T, beta=beta,
                      threshold=thresholds[0])
         # copy ANN weights into SNN linear layers
         snn.fc1.load_state_dict(ann.net[0].state_dict())

@@ -6,10 +6,29 @@ wheels are unreliable — tools/check_env.py will warn you.
 from __future__ import annotations
 
 
+# basic.cfg button order: MOVE_LEFT, MOVE_RIGHT, ATTACK.
 BASIC_ACTIONS = [
     [True, False, False],   # MOVE_LEFT
     [False, True, False],   # MOVE_RIGHT
     [False, False, True],   # ATTACK
+]
+
+# defend_the_center.cfg button order: TURN_LEFT, TURN_RIGHT, ATTACK.
+# Same shape as basic (3) but completely different semantics — do NOT reuse
+# BASIC_ACTIONS here (strafing does nothing in defend).
+DEFEND_ACTIONS = [
+    [True, False, False],   # TURN_LEFT
+    [False, True, False],   # TURN_RIGHT
+    [False, False, True],   # ATTACK
+]
+
+# health_gathering.cfg button order: TURN_LEFT, TURN_RIGHT, MOVE_FORWARD.
+# Navigation-only scenario: no ATTACK. Using BASIC_ACTIONS here leaves the
+# agent unable to move forward/turn, which is why health training was flat.
+HEALTH_ACTIONS = [
+    [True, False, False],   # TURN_LEFT
+    [False, True, False],   # TURN_RIGHT
+    [False, False, True],   # MOVE_FORWARD
 ]
 
 # deadly_corridor.cfg exposes 7 buttons (move + turn, no strafe-fire combo).
@@ -26,12 +45,40 @@ CORRIDOR_ACTIONS = [
 
 ACTION_TABLES = {3: BASIC_ACTIONS, 7: CORRIDOR_ACTIONS}
 
+# Scenario -> correct 3-button table. Corridor is 7-button and handled above.
+SCENARIO_ACTIONS = {
+    "basic": BASIC_ACTIONS,
+    "defend_the_center": DEFEND_ACTIONS,
+    "health_gathering": HEALTH_ACTIONS,
+    "deadly_corridor": CORRIDOR_ACTIONS,
+}
 
-def get_action_table(n_actions: int):
+
+def get_action_table(n_actions: int, scenario: str | None = None):
+    """Return the action table for n_actions, scenario-aware when given.
+
+    Backward compatible: get_action_table(3) -> BASIC_ACTIONS.
+    Preferred: get_action_table_for_scenario(scenario).
+    """
+    if scenario is not None and scenario in SCENARIO_ACTIONS:
+        table = SCENARIO_ACTIONS[scenario]
+        if len(table) != n_actions:
+            raise ValueError(
+                f"{scenario}: cfg n_actions={n_actions} but scenario table "
+                f"has {len(table)} actions")
+        return table
     try:
         return ACTION_TABLES[n_actions]
     except KeyError:
         raise ValueError(f"no action table for {n_actions} buttons (have {sorted(ACTION_TABLES)})")
+
+
+def get_action_table_for_scenario(scenario: str):
+    """Preferred helper: scenario name -> correct action list."""
+    try:
+        return SCENARIO_ACTIONS[scenario]
+    except KeyError:
+        raise ValueError(f"unknown scenario {scenario!r} (have {sorted(SCENARIO_ACTIONS)})")
 
 SCENARIO_FILES = {
     "basic": ("basic.wad", "basic.cfg"),
@@ -67,9 +114,12 @@ def create_game(scenario: str = "basic", visible: bool = False, sound: bool = Fa
     if os.path.isfile(wad_path):
         game.set_doom_scenario_path(wad_path)
     n_buttons = len(game.get_available_buttons())
-    if n_buttons != 3:
-        print(f"[wrapper] note: scenario {scenario!r} exposes {n_buttons} buttons; "
-              f"BASIC_ACTIONS covers the first 3 (MOVE_LEFT, MOVE_RIGHT, ATTACK).")
+    expected = SCENARIO_ACTIONS.get(scenario)
+    if expected is not None and n_buttons != len(expected):
+        print(f"[wrapper] WARN: scenario {scenario!r} exposes {n_buttons} buttons "
+              f"but table has {len(expected)}. Check .cfg vs SCENARIO_ACTIONS.")
+    elif expected is None and n_buttons != 3:
+        print(f"[wrapper] note: scenario {scenario!r} exposes {n_buttons} buttons.")
     game.set_doom_map("map01")
     game.set_screen_resolution(vzd.ScreenResolution.RES_640X480)
     game.set_screen_format(vzd.ScreenFormat.RGB24)

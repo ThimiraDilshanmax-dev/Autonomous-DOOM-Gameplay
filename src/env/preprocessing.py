@@ -46,3 +46,37 @@ class FrameStack:
 
     def get(self) -> np.ndarray:
         return np.stack(self.frames, axis=0)
+
+
+def obs_dim(size: int, stack_frames: int, obs_mode: str = "mean") -> int:
+    """Flat MLP input dim for an obs_mode.
+
+    - "mean": average the k frames -> size*size (legacy, basic/defend compat).
+    - "stack": preserve all k frames -> k*size*size (required for navigation
+      like health_gathering where mean destroys motion cues).
+    """
+    if obs_mode == "stack":
+        return stack_frames * size * size
+    return size * size
+
+
+def stack_to_obs(stack: np.ndarray, obs_mode: str = "mean") -> np.ndarray:
+    """Convert (k, size, size) stack to flat vector for MLP/SNN.
+
+    Keeps a single entry point so train/convert/eval can't drift apart.
+    """
+    if obs_mode == "stack":
+        return stack.reshape(-1).astype(np.float32)
+    return stack.mean(axis=0).reshape(-1).astype(np.float32)
+
+
+def stack_to_spike_shape(obs: np.ndarray, size: int, stack_frames: int,
+                         obs_mode: str = "mean") -> np.ndarray:
+    """Reshape flat obs back to spatial form for Poisson encoding diagnostics.
+
+    Returns (..., size, size) for mean or (..., stack_frames, size, size)
+    for stack. Pure reshape helper, no copy semantics change.
+    """
+    if obs_mode == "stack":
+        return obs.reshape(-1, stack_frames, size, size)
+    return obs.reshape(-1, size, size)

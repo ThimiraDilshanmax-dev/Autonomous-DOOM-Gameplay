@@ -24,10 +24,19 @@ def export_snn(model, out_dir: str = "artifacts", beta: float = 0.5,
     n_hidden = getattr(model, "hidden", 128)
     n_out = model.fc3.out_features if hasattr(model, "fc3") else 3
     assert 2 * n_hidden + n_out <= 1024, "exceeds Cerebra-H 1024-neuron budget"
+    try:
+        in_dim = int(model.fc1.in_features)
+    except Exception:
+        in_dim = 784
+    n_syn = in_dim * n_hidden + n_hidden * n_hidden + n_hidden * n_out
+    if n_syn > 524288:
+        print(f"[export] WARN: {n_syn} synapses exceeds Cerebra-H ~524k budget "
+              f"(in={in_dim}, hidden={n_hidden}). Consider smaller hidden/size.")
     cfg = {
         "beta": beta, "threshold": threshold, "T": T,
         "reset_mode": "subtractive",
         "hidden": n_hidden, "n_actions": n_out,
+        "input_dim": in_dim, "total_synapses": n_syn,
         "total_neurons": 2 * n_hidden + n_out,
         "cluster_map_hidden1": cluster_map(n_hidden),
         "cluster_map_hidden2": cluster_map(n_hidden),

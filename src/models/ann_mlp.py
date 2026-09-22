@@ -1,7 +1,10 @@
-"""ANN baseline MLP: flattened frame-stack -> hidden -> Q-values/logits.
+"""ANN baseline MLP: flattened frames -> hidden -> Q-values/logits.
 
-Small on purpose: input 4*28*28=3136 (or single 28*28=784) -> H=128 -> A.
-Total params ~400k — fits easily; SNN twin keeps same sizes (proposal Table 1).
+Two geometries (see preprocessing.obs_dim):
+- mean: 28*28=784 (legacy basic/defend checkpoints)
+- stack: 4*28*28=3136 (navigation/health — preserves motion cues)
+Hidden 128 keeps total neurons 2*H+A <= 1024 and synapses < ~524k for
+Cerebra-H (stack-128 ≈ 418k synapses, mean-128 ≈ 117k).
 """
 import torch
 import torch.nn as nn

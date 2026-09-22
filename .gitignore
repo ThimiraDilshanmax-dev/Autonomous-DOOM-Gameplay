@@ -16,3 +16,5 @@ conversion_*/
 finetune_*/
 quant_*/
 robust_*/
+*.pdf
+*.log

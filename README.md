@@ -105,7 +105,16 @@ and a score table (`checkpoints/`, `videos/`, `runs/`, `scores.json`):
 Evaluate trained checkpoints greedily (kill rate over 50 episodes):
 
 ```bash
-~/snn-venv/bin/python tools/wsl_eval_basic.py
+~/snn-venv/bin/python tools/wsl_eval_basic.py --config configs/basic.yaml --scenario basic --ckpt training_basic4000/checkpoints/final.pth --episodes 50
+```
+
+Health_gathering (navigation) — must retrain from scratch with the fixed
+stacked-obs + HEALTH shaping (old `training_health*/checkpoints` were
+mean/784 and are incompatible with the new stack/3136 geometry):
+
+```bash
+~/snn-venv/bin/python src/train/train_ann_basic.py --config configs/health.yaml --episodes 1500 --save-every 100 --out-dir training_health_fixed
+~/snn-venv/bin/python tools/wsl_eval_basic.py --config configs/health.yaml --scenario health_gathering --ckpt training_health_fixed/checkpoints/best.pth --episodes 50 --episode-timeout 2100
 ```
 
 ### 4. ANN-to-SNN conversion (WSL2)
